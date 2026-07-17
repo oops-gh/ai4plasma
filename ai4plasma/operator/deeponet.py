@@ -311,13 +311,17 @@ class DeepONetModel(BaseModel):
                 - FNN: branch_inputs shape (batch_size, features)
                 - CNN: branch_inputs shape (batch_size, channels, height, width)
             """
-            branch_inputs = [item[0] for item in batch]
-            trunk_inputs = batch[0][1]  # trunk_inputs is the same for all items
-            targets = [item[2] for item in batch]
-
-            # Stack branch inputs - automatically handles both 3D (CNN) and 1D (FNN) cases
-            branch_inputs = torch.stack(branch_inputs)
-            targets = torch.stack(targets)
+            if split_by_branch:
+                branch_inputs = torch.stack([item[0] for item in batch])
+                trunk_inputs = batch[0][1]  # Shared by all branch samples
+                targets = torch.stack([item[2] for item in batch])
+            else:
+                # Every item contains the complete branch input set and one
+                # trunk point. Keep branch inputs unchanged, stack trunk points,
+                # and transpose targets to the DeepONet output shape (A, batch).
+                branch_inputs = batch[0][0]
+                trunk_inputs = torch.stack([item[1] for item in batch])
+                targets = torch.stack([item[2] for item in batch], dim=1)
 
             return branch_inputs, trunk_inputs, targets
 
@@ -368,8 +372,8 @@ class DeepONetModel(BaseModel):
             The predicted output of the DeepONet model.
         """
         self.network.eval()  # Set the model to evaluation mode
-
-        return self.network(branch_input_data, trunk_input_data)
+        with torch.no_grad():
+            return self.network(branch_input_data, trunk_input_data)
     
 
     def train(self, num_epochs,
@@ -492,6 +496,7 @@ class DeepONetModel(BaseModel):
         # Training loop
         total_epochs = self.start_epoch + num_epochs
         for epoch in range(self.start_epoch, total_epochs):
+            self.network.train()
             epoch_loss = 0.0
             batch_count = 0
             for branch_batch, trunk_batch, target_batch in self.dataloader:
@@ -550,7 +555,6 @@ class DeepONetModel(BaseModel):
         if self.writer is not None:
             self.writer.close()
    
-
 
 
 

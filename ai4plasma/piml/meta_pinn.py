@@ -512,6 +512,7 @@ class MetaPINN:
 
         # Meta-training loop (outer loop)
         for epoch in range(self.last_outer_epochs, self.outer_epochs):
+            self.meta_network.train()
             loss_qry_tot = 0  # Initialize total query loss for this meta-iteration
             task_weights = [param.data for param in self.meta_network.parameters()]  # Store meta-parameters before inner loop
             
@@ -639,6 +640,7 @@ class MetaPINN:
 
         # Adapt to each test task independently
         for i, task in enumerate(self.test_tasks):
+            self.meta_network.train()
             
             # Reset to meta-initialization for this task
             for kk, param in enumerate(self.meta_network.parameters()):
@@ -1086,5 +1088,4 @@ class StaArc1DTask(PINNTask):
 
         # Register with parent PINNTask class
         super().__init__(task_id, pinn_model, support_data, query_data)
-
 

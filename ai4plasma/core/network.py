@@ -281,7 +281,9 @@ class CNN(Network):
         self.conv_net = self._build_conv_layers(conv_layers, kernel_size, stride, padding,
                                                 pooling_kernel_size, self.pooling_stride, pooling_padding)
         
-        # FC net will be built lazily on first forward pass if fc_layers is specified
+        # FC parameters are registered during construction. The first LazyLinear
+        # layer materializes its input dimension on the first forward pass, so an
+        # optimizer created beforehand still includes every trainable parameter.
         self.fc_net = None
         self.fc_layers = None
         self._fc_initialized = False
@@ -295,6 +297,12 @@ class CNN(Network):
         
         # Initialize conv weights
         self.init_weights(init_method)
+
+        if self.use_fc:
+            if len(self.fc_layers_config) < 2:
+                raise ValueError("fc_layers must contain at least input and output dimensions")
+            self.fc_layers = list(self.fc_layers_config)
+            self.fc_net = self._build_fc_layers(self.fc_layers, lazy_first=True)
     
     def _get_conv_layer(self):
         """Get the appropriate convolution layer class.
@@ -464,7 +472,7 @@ class CNN(Network):
         
         return model
     
-    def _build_fc_layers(self, layers):
+    def _build_fc_layers(self, layers, lazy_first=False):
         """Build the fully connected layers of the network.
         
         Parameters
@@ -483,7 +491,11 @@ class CNN(Network):
         for i in range(len(layers) - 1):
             # Linear layer
             linear_name = f'fc{i + 1}'
-            model.add_module(linear_name, nn.Linear(layers[i], layers[i + 1], dtype=REAL('torch')))
+            if lazy_first and i == 0:
+                linear_layer = nn.LazyLinear(layers[i + 1], dtype=REAL('torch'))
+            else:
+                linear_layer = nn.Linear(layers[i], layers[i + 1], dtype=REAL('torch'))
+            model.add_module(linear_name, linear_layer)
             
             # Activation (except for the last layer)
             if i < len(layers) - 2:
@@ -492,7 +504,7 @@ class CNN(Network):
         
         return model
     
-    def init_weights(self, method='xavier'):
+    def init_weights(self, method='xavier', module=None):
         """Initialize network weights using the specified method.
         
         Applies the initialization strategy to all convolutional, linear,
@@ -502,8 +514,11 @@ class CNN(Network):
         ----------
         method : {'xavier', 'kaiming', 'zero'}, optional
             Weight initialization method. Default is 'xavier'.
+        module : torch.nn.Module, optional
+            Module subtree to initialize. If None, initialize the complete CNN.
         """
-        for m in self.modules():
+        target_module = self if module is None else module
+        for m in target_module.modules():
             if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
                 if method == 'zero':
                     nn.init.constant_(m.weight, 0.0)
@@ -541,24 +556,6 @@ class CNN(Network):
         torch.Tensor
             Output tensor of shape (batch_size, output_features).
         """
-        # Lazily initialize FC layers on first forward pass
-        if self.use_fc and not self._fc_initialized:
-            # Calculate actual feature size from input
-            actual_feature_size = self._calculate_feature_size(x)
-            
-            # Adjust fc_layers config if needed
-            if self.fc_layers_config[0] != actual_feature_size:
-                adjusted_fc_layers = [actual_feature_size] + self.fc_layers_config[1:]
-                print(f"[INFO] CNN: Automatically adjusted fc_layers[0] from {self.fc_layers_config[0]} to {actual_feature_size} (based on actual input shape {x.shape})")
-                self.fc_layers = adjusted_fc_layers
-            else:
-                self.fc_layers = self.fc_layers_config
-            
-            # Build FC layers
-            self.fc_net = self._build_fc_layers(self.fc_layers)
-            self.fc_net = self.fc_net.to(x.device)
-            self._fc_initialized = True
-        
         # Pass through convolutional layers
         out = self.conv_net(x)
         
@@ -566,6 +563,24 @@ class CNN(Network):
         if self.use_fc:
             # Flatten for fully connected layers
             out = out.view(out.size(0), -1)  # (batch_size, flattened_features)
+
+            if not self._fc_initialized:
+                actual_feature_size = out.size(1)
+                if self.fc_layers_config[0] != actual_feature_size:
+                    print(
+                        f"[INFO] CNN: Automatically adjusted fc_layers[0] from "
+                        f"{self.fc_layers_config[0]} to {actual_feature_size} "
+                        f"(based on actual input shape {x.shape})"
+                    )
+                self.fc_layers = [actual_feature_size] + list(self.fc_layers_config[1:])
+
+                first_layer = self.fc_net[0]
+                if (hasattr(first_layer, 'has_uninitialized_params')
+                        and first_layer.has_uninitialized_params()):
+                    first_layer.initialize_parameters(out)
+                    self.init_weights(self.init_method, module=self.fc_net)
+                self._fc_initialized = True
+
             out = self.fc_net(out)
         else:
             # Global average pooling for regression

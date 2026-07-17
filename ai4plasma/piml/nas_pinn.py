@@ -231,6 +231,8 @@ class NasPINN:
         if tensorboard_logdir:
             self.writer = SummaryWriter(tensorboard_logdir)
             self.pinn_model.writer = self.writer  # Pass writer to PINN model for visualization callbacks
+        else:
+            self.writer = None
 
         # Create checkpoint directory
         if checkpoint_dir:
@@ -238,6 +240,7 @@ class NasPINN:
 
         # NAS-PINN loop
         for epoch_arch in range(self.last_outer_epochs, self.outer_epochs):
+            self.pinn_model.network.train()
 
             loop = tqdm(range(self.inner_epochs), total=self.inner_epochs)
             for index in loop:
@@ -257,12 +260,12 @@ class NasPINN:
             # Training log
             loss_val = loss.item()
             loss_archi_val = loss_archi.item()
-            if(epoch_arch+1)%log_freq == 0:
+            if self.writer is not None and log_freq > 0 and (epoch_arch + 1) % log_freq == 0:
                 self.writer.add_scalar('Loss-archi', loss_archi_val, epoch_arch)
                 self.writer.add_scalar('Loss', loss_val, epoch_arch)
                 self.writer.flush()
             
-            if (epoch_arch+1)%print_freq == 0:
+            if print_freq > 0 and (epoch_arch + 1) % print_freq == 0:
                 print('Epoch: [%d/%d] Loss: %g Loss-archi: %g' % (epoch_arch+1, outer_epochs, loss_val, loss_archi_val))
             
                 final_neuron = self.pinn_model.network.searched_neuron()
@@ -273,7 +276,7 @@ class NasPINN:
             self.pinn_model._execute_visualization_callbacks(epoch_arch, loss_dict=loss_dict, total_loss=loss)
             
             # Save checkpoint periodically
-            if checkpoint_dir and (epoch_arch+1) % checkpoint_freq == 0:
+            if checkpoint_dir and checkpoint_freq > 0 and (epoch_arch + 1) % checkpoint_freq == 0:
                 checkpoint_path = os.path.join(checkpoint_dir, f'nas_pinn_epoch_{epoch_arch+1}.pth')
                 self.save_nas_model(epoch_arch+1, checkpoint_path)
         

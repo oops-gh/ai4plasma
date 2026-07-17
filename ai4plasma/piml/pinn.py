@@ -665,7 +665,7 @@ class PINN(BaseModel, ABC):
         status = 'enabled' if enable else 'disabled'
         print(f'Adaptive weighting {status} (update frequency: {update_freq} epochs)')
     
-    def _compute_adaptive_weights(self, loss_dict: Dict[str, torch.Tensor]):
+    def _compute_adaptive_weights(self, loss_dict: Dict[str, Union[torch.Tensor, float]]):
         '''
         Compute and update adaptive weights based on current loss magnitudes.
         
@@ -683,23 +683,29 @@ class PINN(BaseModel, ABC):
         
         Parameters:
         -----------
-        loss_dict : Dict[str, torch.Tensor]
+        loss_dict : Dict[str, torch.Tensor or float]
             Dictionary mapping equation names to their current loss values.
-            Values should be scalar tensors (each represents accumulated loss for one term).
+            Values may be scalar tensors or numeric values accumulated during
+            batched training.
             Format: {'domain': loss_tensor, 'boundary': loss_tensor, ...}
         '''
         if not self.adaptive_weights or len(loss_dict) < 2:
             return
         
-        # Compute average of individual loss magnitudes
-        avg_loss = torch.mean(torch.stack(list(loss_dict.values())))
+        # Normalize tensor and numeric losses to Python floats. Batched training
+        # accumulates losses as floats, while full-batch training keeps tensors.
+        loss_values = {
+            name: loss.detach().item() if isinstance(loss, torch.Tensor) else float(loss)
+            for name, loss in loss_dict.items()
+        }
+        avg_loss = sum(loss_values.values()) / len(loss_values)
         
         # Scale weights inversely proportional to loss magnitude
-        for name, loss in loss_dict.items():
-            if loss.item() > 0:
-                scaling_factor = avg_loss / (loss + 1e-8)
+        for name, loss_value in loss_values.items():
+            if loss_value > 0:
+                scaling_factor = avg_loss / (loss_value + 1e-8)
                 current_weight = self.equation_terms[name].weight
-                new_weight = current_weight * scaling_factor.item()
+                new_weight = current_weight * scaling_factor
                 self.equation_terms[name].update_weight(new_weight)
     
     def calc_loss(self, weights_override: Dict[str, float] = None, batch_data: Dict[str, torch.Tensor] = None) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -845,18 +851,27 @@ class PINN(BaseModel, ABC):
         if eq_term is None:
             raise ValueError(f'Equation term "{name}" not found')
         
-        if input_data is not None:
-            original_data = eq_term.data
-            eq_term.update_data(input_data)
-        
+        residual_data = input_data if input_data is not None else eq_term.data
+        if (isinstance(residual_data, torch.Tensor)
+                and (residual_data.is_floating_point() or residual_data.is_complex())
+                and not residual_data.requires_grad):
+            residual_data = residual_data.detach().clone().requires_grad_(True)
+
+        was_training = self.network.training
         self.network.eval()
-        with torch.no_grad():
-            residual = eq_term.compute_residual(self.network)
-        
-        if input_data is not None:
-            eq_term.update_data(original_data)
-        
-        return residual
+        try:
+            # PINN residuals commonly contain first- or higher-order derivatives,
+            # so autograd must remain enabled even though the network is in eval mode.
+            with torch.enable_grad():
+                residual = eq_term.compute_residual(
+                    self.network,
+                    batch_data=residual_data,
+                )
+        finally:
+            if was_training:
+                self.network.train()
+
+        return residual.detach()
     
     def get_equation_info(self) -> Dict:
         '''
@@ -1539,6 +1554,8 @@ class PINN(BaseModel, ABC):
         - lr_scheduler: Learning rate scheduler
         - visualization_kwargs (Dict): Visualization arguments
         '''
+        self.network.train()
+
         # Compute loss
         total_loss, loss_dict = self.calc_loss(weights_override=weights_override)
 
@@ -1597,6 +1614,8 @@ class PINN(BaseModel, ABC):
         - lr_scheduler: Learning rate scheduler
         - visualization_kwargs (Dict): Visualization arguments
         '''
+        self.network.train()
+
         # Determine the number of batches (use the max across all dataloaders)
         num_batches = max(len(dl) for dl in dataloaders.values()) if dataloaders else 1
         
@@ -1673,7 +1692,6 @@ class PINN(BaseModel, ABC):
         # Training history
         self.training_history['loss'].append(epoch_loss)
         self.training_history['epoch'].append(epoch + 1)
-
 
 
 

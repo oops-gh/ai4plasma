@@ -497,8 +497,12 @@ class DeepCSNetModel(BaseModel):
             Shape: [batch_size, n_points]
         """
         self.network.eval()  # Set the network to evaluation mode
-        
-        return self.network(trunk_input=trunk_input, molecule_input=molecule_input, energy_input=energy_input)
+        with torch.no_grad():
+            return self.network(
+                trunk_input=trunk_input,
+                molecule_input=molecule_input,
+                energy_input=energy_input,
+            )
     
 
     def train(self,
@@ -646,6 +650,7 @@ class DeepCSNetModel(BaseModel):
         # Training loop
         total_epochs = self.start_epoch + num_epochs
         for epoch in range(self.start_epoch, total_epochs):
+            self.network.train()
             epoch_loss = 0.0
             batch_count = 0
             for molecule_batch, energy_batch, trunk_batch, target_batch in self.dataloader:
