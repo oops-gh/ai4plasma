@@ -24,3 +24,4 @@ app/operator/deeponet/results*
 app/operator/deepcsnet/models*
 app/operator/deepcsnet/runs*
 app/operator/deepcsnet/results*
+.pytest_cache/
